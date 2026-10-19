@@ -1,0 +1,58 @@
+# ============================================================================
+# Sealed Arena — Model Zone Dockerfile
+# ============================================================================
+# The Model Zone hosts the LLM under test. It can ONLY communicate with the
+# Referee via the model-net network. It has no internet access and no
+# visibility into Red Zone or Blue Zone.
+#
+# Key defenses active in this zone:
+#   - KV-cache salting: per-tenant cache namespace prevents timing side-channels
+#   - Clean-Model Guarantee: state is snapshotted and reset between runs
+#   - Canary strings: detect contamination across sessions
+#
+# Build: docker build -f deploy/Dockerfile.model -t sealed-arena-model .
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build dependencies
+# ---------------------------------------------------------------------------
+FROM python:3.14-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libffi-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# Stage 2: Runtime image (minimal, locked down)
+# ---------------------------------------------------------------------------
+FROM python:3.14-slim AS runtime
+
+# Security: run as non-root user
+RUN groupadd -r arena && \
+    useradd -r -g arena -d /app -s /sbin/nologin arena
+
+COPY --from=builder /install /usr/local
+
+WORKDIR /app
+
+# Copy only the model zone source
+COPY src/zones/model/ ./src/zones/model/
+COPY src/common/ ./src/common/
+
+# No persistent volumes — model cache uses tmpfs (see docker-compose.yml)
+# This ensures the model state is ephemeral and reset between runs
+
+USER arena
+
+# Health check: verify connectivity to Referee
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://referee:8000/health')"
+
+# Run the Model Zone service
+ENTRYPOINT ["python", "-m"]
+CMD ["src.zones.model.server"]

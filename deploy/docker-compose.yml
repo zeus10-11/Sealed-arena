@@ -1,0 +1,267 @@
+# ============================================================================
+# Sealed Arena — Docker Compose Configuration
+# ============================================================================
+# Micro-segmented network architecture for adversarial AI safety testing.
+#
+# Three isolated networks enforce the Blind Referee pattern:
+#   - red-net:   Red Zone ↔ Referee only
+#   - blue-net:  Blue Zone ↔ Referee only
+#   - model-net: Model Zone ↔ Referee only
+#
+# No zone can communicate with any other zone directly.
+# All inter-zone traffic is mediated, logged, and policy-checked by the Referee.
+# ============================================================================
+
+services:
+  # --------------------------------------------------------------------------
+  # REFEREE — The only trusted mediator between all zones
+  # --------------------------------------------------------------------------
+  referee:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.referee
+    container_name: sealed-arena-referee
+    hostname: referee
+    ports:
+      - "8000:8000"
+    networks:
+      - red-net
+      - blue-net
+      - model-net
+    volumes:
+      - audit-logs:/app/audit
+    environment:
+      - SEALED_ARENA_ENV=production
+      - REFEREE_HOST=0.0.0.0
+      - REFEREE_PORT=8000
+      - AUDIT_LOG_DIR=/app/audit
+      - LOG_LEVEL=INFO
+      # Timing-channel closure: fixed response cadence in milliseconds
+      - TIMING_BUCKET_MS=500
+      # Query budget per token (anti-reconstruction defense)
+      - MAX_QUERIES_PER_TOKEN=50
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=seccomp-profile.json
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 128M
+          cpus: "0.25"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --------------------------------------------------------------------------
+  # RED ZONE — Attack environment (isolated on red-net only)
+  # --------------------------------------------------------------------------
+  red-zone:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.red
+    container_name: sealed-arena-red
+    hostname: red-zone
+    networks:
+      - red-net
+    environment:
+      - SEALED_ARENA_ENV=production
+      - ZONE_NAME=red
+      - REFEREE_URL=http://referee:8000
+      - LOG_LEVEL=INFO
+    depends_on:
+      referee:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://referee:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=seccomp-profile.json
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+          cpus: "0.1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --------------------------------------------------------------------------
+  # BLUE ZONE — Defense environment (isolated on blue-net only)
+  # --------------------------------------------------------------------------
+  blue-zone:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.blue
+    container_name: sealed-arena-blue
+    hostname: blue-zone
+    networks:
+      - blue-net
+    environment:
+      - SEALED_ARENA_ENV=production
+      - ZONE_NAME=blue
+      - REFEREE_URL=http://referee:8000
+      - LOG_LEVEL=INFO
+    depends_on:
+      referee:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://referee:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=seccomp-profile.json
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+          cpus: "0.1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --------------------------------------------------------------------------
+  # MODEL ZONE — LLM inference (isolated on model-net only)
+  # --------------------------------------------------------------------------
+  model-zone:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.model
+    container_name: sealed-arena-model
+    hostname: model-zone
+    networks:
+      - model-net
+    environment:
+      - SEALED_ARENA_ENV=production
+      - ZONE_NAME=model
+      - REFEREE_URL=http://referee:8000
+      - LOG_LEVEL=INFO
+      # KV-cache salting: per-tenant cache namespace
+      - CACHE_SALT_ENABLED=true
+      # Clean-Model Guarantee: reset state between runs
+      - MODEL_RESET_BETWEEN_RUNS=true
+    depends_on:
+      referee:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://referee:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,noexec,nosuid
+      - /app/model_cache:size=256M,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=seccomp-profile.json
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+        reservations:
+          memory: 128M
+          cpus: "0.1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ============================================================================
+# NETWORKS — Micro-segmented, internal-only isolation
+# ============================================================================
+# Each network is marked internal: true, which means:
+#   - No outbound internet access from any container on the network
+#   - Containers can only reach other containers on the same network
+#   - The Referee is the ONLY service connected to all three networks
+# ============================================================================
+networks:
+  red-net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.1.0/24
+    labels:
+      sealed-arena.zone: "red"
+      sealed-arena.description: "Isolated network for Red Zone (attack) ↔ Referee"
+
+  blue-net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.2.0/24
+    labels:
+      sealed-arena.zone: "blue"
+      sealed-arena.description: "Isolated network for Blue Zone (defense) ↔ Referee"
+
+  model-net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.28.3.0/24
+    labels:
+      sealed-arena.zone: "model"
+      sealed-arena.description: "Isolated network for Model Zone (LLM) ↔ Referee"
+
+# ============================================================================
+# VOLUMES — Persistent storage for audit logs only
+# ============================================================================
+volumes:
+  audit-logs:
+    driver: local
+    labels:
+      sealed-arena.purpose: "Tamper-evident audit chain storage"

@@ -1,0 +1,61 @@
+# ============================================================================
+# Sealed Arena — Referee Service Dockerfile
+# ============================================================================
+# The Referee is the sole trusted mediator between Red, Blue, and Model zones.
+# It enforces capability tokens, commit-reveal, timing shaping, and maintains
+# the tamper-evident audit chain.
+#
+# Build: docker build -f deploy/Dockerfile.referee -t sealed-arena-referee .
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build dependencies
+# ---------------------------------------------------------------------------
+FROM python:3.14-slim AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libffi-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# Stage 2: Runtime image (minimal)
+# ---------------------------------------------------------------------------
+FROM python:3.14-slim AS runtime
+
+# Security: run as non-root user
+RUN groupadd -r arena && \
+    useradd -r -g arena -d /app -s /sbin/nologin arena
+
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
+
+# Set up application directory
+WORKDIR /app
+
+# Copy application source
+COPY src/ ./src/
+COPY config/ ./config/
+
+# Create audit log directory (will be mounted as volume)
+RUN mkdir -p /app/audit && chown arena:arena /app/audit
+
+# Switch to non-root user
+USER arena
+
+# Expose the Referee API port
+EXPOSE 8000
+
+# Health check endpoint
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=10s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+
+# Run the Referee service
+ENTRYPOINT ["python", "-m", "uvicorn"]
+CMD ["src.referee.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

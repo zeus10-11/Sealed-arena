@@ -1,0 +1,57 @@
+# ============================================================================
+# Sealed Arena — Blue Zone Dockerfile
+# ============================================================================
+# The Blue Zone is the defense environment. It can ONLY communicate with the
+# Referee via the blue-net network. It has no internet access and no
+# visibility into Red Zone or Model Zone.
+#
+# Blue's defense logic (e.g., guardrail classifier) runs as a sealed plugin
+# inside the Referee's execution path. The Blue Zone team receives only
+# aggregate results after the test concludes.
+#
+# Build: docker build -f deploy/Dockerfile.blue -t sealed-arena-blue .
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build dependencies
+# ---------------------------------------------------------------------------
+FROM python:3.14-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libffi-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# Stage 2: Runtime image (minimal, locked down)
+# ---------------------------------------------------------------------------
+FROM python:3.14-slim AS runtime
+
+# Security: run as non-root user
+RUN groupadd -r arena && \
+    useradd -r -g arena -d /app -s /sbin/nologin arena
+
+COPY --from=builder /install /usr/local
+
+WORKDIR /app
+
+# Copy only the blue zone agent source
+COPY src/zones/blue/ ./src/zones/blue/
+COPY src/common/ ./src/common/
+
+# No volumes — blue zone has no persistent storage
+# No shared directories — prevents filesystem-based leakage
+
+USER arena
+
+# Health check: verify connectivity to Referee
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://referee:8000/health')"
+
+# Run the Blue Zone agent
+ENTRYPOINT ["python", "-m"]
+CMD ["src.zones.blue.agent"]
